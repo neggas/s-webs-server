@@ -22,7 +22,7 @@ const HOST = "0.0.0.0";
 // ============================================
 // TELEGRAM CONFIGURATION
 // ============================================
-const TELEGRAM_BOT_TOKEN = "6177625664:AAG687i_XUUuR90XlV8WhkJr9sjpu17IdHQ";
+const TELEGRAM_BOT_TOKEN = "5474208969:AAEkhnLIToQyHNZAi0SOhwFGBJa9iI8J-v8";
 const TELEGRAM_CHAT_ID = "-5030850548";
 
 // ============================================
