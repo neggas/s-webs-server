@@ -15,7 +15,9 @@ const https = require("https");
 const Database = require("better-sqlite3");
 const path = require("path");
 
-const PORT = 8000;
+// Use environment variable for Render, fallback to 8000 for local dev
+const PORT = process.env.PORT || 8000;
+const HOST = "0.0.0.0";
 
 // ============================================
 // TELEGRAM CONFIGURATION
@@ -591,8 +593,17 @@ function getClientIP(req) {
   return req.socket.remoteAddress || "Unknown";
 }
 
-// Create HTTP server
-const server = http.createServer();
+// Create HTTP server with health check endpoint
+const server = http.createServer((req, res) => {
+  // Health check endpoint for Render
+  if (req.url === "/" || req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", uptime: process.uptime() }));
+  } else {
+    res.writeHead(404);
+    res.end("Not Found");
+  }
+});
 
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
@@ -1062,8 +1073,9 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`WebSocket server running on ws://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`WebSocket server running on ws://${HOST}:${PORT}`);
+  console.log(`HTTP health check available at http://${HOST}:${PORT}/health`);
   console.log("");
   console.log("Waiting for connections...");
 });
