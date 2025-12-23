@@ -1,0 +1,13 @@
+{
+  "name": "verification-websocket-server",
+  "version": "1.0.0",
+  "description": "WebSocket server for real-time user verification",
+  "main": "websocket-server.js",
+  "scripts": {
+    "start": "node websocket-server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "ws": "^8.14.0"
+  }
+}
